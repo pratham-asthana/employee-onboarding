@@ -2,25 +2,17 @@ from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, END
 from db import save_to_db
 
-# Define the state structure for our graph
+# --- State Definition ---
 class OnboardingState(TypedDict):
     """
     Represents the state of our onboarding workflow.
-    
-    Attributes:
-        history: The conversation history.
-        onboarding_data: A list of dictionaries, each holding one employee's data.
-        current_manual_entry: A dictionary to build up a single employee's data manually.
-        manual_entry_field: The current field we are asking for in manual entry mode.
-        error_message: Any error message to be displayed to the user.
     """
     history: List[Dict[str, Any]]
     onboarding_data: List[Dict[str, Any]]
     current_manual_entry: Dict[str, Any]
     manual_entry_field: str
-    error_message: str
 
-# --- Graph Node Functions ---
+# --- Graph Node Functions (No changes needed here) ---
 
 def start_onboarding(state: OnboardingState):
     """Node to begin the onboarding flow."""
@@ -34,13 +26,11 @@ def start_onboarding(state: OnboardingState):
 
 def process_upload(state: OnboardingState):
     """Node to confirm file upload and show extracted data."""
-    # The actual file processing and extraction happens in the Streamlit UI.
-    # This node just confirms the data received and moves to validation.
     state['history'].append({
         "role": "assistant",
         "content": "File processed. Here is the extracted data. Please review it carefully."
     })
-    return state # Go directly to validation after processing
+    return state
 
 def start_manual_entry(state: OnboardingState):
     """Node to start the manual data entry process."""
@@ -69,7 +59,6 @@ def process_manual_entry(state: OnboardingState):
             "content": f"Great. Now, what is their {next_field.replace('_', ' ')}?"
         })
     else:
-        # All fields collected
         state['onboarding_data'].append(state['current_manual_entry'])
         state['manual_entry_field'] = None # Signal completion
         state['current_manual_entry'] = {}
@@ -104,49 +93,40 @@ def save_data(state: OnboardingState):
     })
     return state
 
-# --- Conditional Edge Logic ---
-
-def route_initial_choice(state: OnboardingState):
-    """Router to decide the path after the initial user choice."""
+# --- NEW: Conditional Entry Point Router ---
+def route_entry_point(state: OnboardingState):
+    """
+    Routes the workflow based on the last user message to the correct starting node.
+    This is the main dispatcher for the graph.
+    """
     last_message = state['history'][-1]['content'].lower()
+
+    if "start onboarding" in last_message:
+        return "start_onboarding"
     if "upload" in last_message:
         return "process_upload"
-    elif "manually" in last_message:
+    if "enter manually" in last_message:
+        # If we are just starting manual entry
+        if not state.get('manual_entry_field'):
+            return "start_manual_entry"
+    if "add another manually" in last_message:
         return "start_manual_entry"
-    else:
-        # If input is unclear, perhaps ask again or handle error
-        state['error_message'] = "Invalid choice. Please choose 'Upload' or 'Manually'."
-        return "start_onboarding" # Loop back
-
-def route_after_manual_entry(state: OnboardingState):
-    """Router to decide if manual entry continues or moves to validation."""
-    if state['manual_entry_field'] is None:
+    if "proceed" in last_message or "modify" in last_message:
         return "validate_data"
-    else:
+    
+    # If none of the above, it's likely data for a manual field
+    if state.get('manual_entry_field'):
         return "process_manual_entry"
+    
+    # Fallback to the beginning
+    return "start_onboarding"
 
-def route_after_validation(state: OnboardingState):
-    """Router to handle user's choice after reviewing the data."""
-    last_message = state['history'][-1]['content'].lower()
-    if "proceed" in last_message:
-        return "save_data"
-    elif "modify" in last_message:
-        # The Streamlit UI will handle the modification logic.
-        # We just need to signal a loop back to validation.
-        return "validate_data"
-    elif "add another" in last_message:
-        return "start_manual_entry"
-    else:
-        return "validate_data" # Loop back on invalid input
-
-
-# --- Workflow Definition ---
-
+# --- REFACTORED: Workflow Definition ---
 def create_onboarding_workflow():
-    """Creates and compiles the LangGraph workflow."""
+    """Creates and compiles the LangGraph workflow with a robust, event-driven structure."""
     workflow = StateGraph(OnboardingState)
 
-    # Add nodes
+    # Add all nodes
     workflow.add_node("start_onboarding", start_onboarding)
     workflow.add_node("process_upload", process_upload)
     workflow.add_node("start_manual_entry", start_manual_entry)
@@ -154,32 +134,37 @@ def create_onboarding_workflow():
     workflow.add_node("validate_data", validate_data)
     workflow.add_node("save_data", save_data)
 
-    # Set entry point
-    workflow.set_entry_point("start_onboarding")
-
-    # Add conditional edges
-    workflow.add_conditional_edges(
-        "start_onboarding",
-        route_initial_choice,
-        {"process_upload": "validate_data", "start_manual_entry": "process_manual_entry"}
-    )
-    workflow.add_conditional_edges(
-        "process_manual_entry",
-        route_after_manual_entry,
-        {"validate_data": "validate_data", "process_manual_entry": "process_manual_entry"}
-    )
-    workflow.add_conditional_edges(
-        "validate_data",
-        route_after_validation,
+    # Set the conditional entry point
+    workflow.set_conditional_entry_point(
+        route_entry_point,
         {
-            "save_data": "save_data",
+            "start_onboarding": "start_onboarding",
+            "process_upload": "process_upload",
+            "start_manual_entry": "start_manual_entry",
+            "process_manual_entry": "process_manual_entry",
             "validate_data": "validate_data",
-            "start_manual_entry": "start_manual_entry"
         }
     )
 
-    # End flow after saving
+    # Define the explicit flow of the graph
+    # KEY FIX: Nodes that require user input now go to END, pausing the graph.
+    workflow.add_edge("start_onboarding", END)
+    workflow.add_edge("start_manual_entry", END)
+    workflow.add_edge("validate_data", END)
     workflow.add_edge("save_data", END)
+
+    # After processing a file, always go to validation
+    workflow.add_edge("process_upload", "validate_data")
+
+    # After processing a manual field, decide whether to ask for the next field or validate
+    workflow.add_conditional_edges(
+        "process_manual_entry",
+        lambda s: "validate_data" if s.get('manual_entry_field') is None else "process_manual_entry",
+        {
+            "process_manual_entry": END, # Ask the next question and wait
+            "validate_data": "validate_data" # All fields collected, go to validation
+        }
+    )
 
     # Compile and return the graph
     return workflow.compile()

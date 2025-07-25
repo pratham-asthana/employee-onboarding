@@ -9,7 +9,7 @@ def get_gemini_model():
     api_key = os.getenv("GOOGLE_API_KEY")
     if not api_key:
         raise ValueError("GOOGLE_API_KEY environment variable not set.")
-    return ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.2)
+    return ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.2)
 
 def parse_excel_file(uploaded_file):
     """Parses an uploaded Excel file and returns a list of dictionaries."""
