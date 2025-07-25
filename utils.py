@@ -76,3 +76,33 @@ def format_salary(salary):
         return float(salary)
     except (ValueError, TypeError):
         return 0.0
+
+def sanitize_input(user_input):
+    """Sanitizes user input by removing potentially harmful characters."""
+    if not isinstance(user_input, str):
+        return str(user_input)
+    # Remove or escape potentially harmful characters
+    sanitized = re.sub(r'[<>"\']', '', user_input.strip())
+    return sanitized
+
+def validate_salary(salary_str):
+    """Validates and converts salary string to float."""
+    try:
+        # Remove currency symbols and commas
+        cleaned = re.sub(r'[^\d.]', '', str(salary_str))
+        salary_float = float(cleaned)
+        return True, salary_float
+    except (ValueError, TypeError):
+        return False, 0.0
+
+def format_employee_data(employee_dict):
+    """Formats employee data for consistent storage."""
+    formatted = {}
+    for key, value in employee_dict.items():
+        if key == 'phone':
+            formatted[key] = sanitize_input(str(value))
+        elif key == 'salary':
+            _, formatted[key] = validate_salary(value)
+        else:
+            formatted[key] = sanitize_input(str(value))
+    return formatted

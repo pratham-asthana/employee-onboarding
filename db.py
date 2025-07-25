@@ -33,3 +33,16 @@ def read_from_db():
         return df.to_dict(orient="records")
     except Exception as e:
         return f"Error reading from database: {e}"
+
+def clear_db():
+    """
+    Clears all employee data from the CSV file.
+    """
+    try:
+        if os.path.exists(DB_FILE):
+            os.remove(DB_FILE)
+            return "Database cleared successfully."
+        else:
+            return "Database file does not exist."
+    except Exception as e:
+        return f"Error clearing database: {e}"

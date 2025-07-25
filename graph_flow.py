@@ -1,6 +1,6 @@
 from typing import TypedDict, List, Dict, Any
 from langgraph.graph import StateGraph, END
-from db import save_to_db
+from db import save_to_db, read_from_db
 
 # --- State Definition ---
 class OnboardingState(TypedDict):
@@ -12,7 +12,7 @@ class OnboardingState(TypedDict):
     current_manual_entry: Dict[str, Any]
     manual_entry_field: str
 
-# --- Graph Node Functions (No changes needed here) ---
+# --- Graph Node Functions ---
 
 def start_onboarding(state: OnboardingState):
     """Node to begin the onboarding flow."""
@@ -26,10 +26,18 @@ def start_onboarding(state: OnboardingState):
 
 def process_upload(state: OnboardingState):
     """Node to confirm file upload and show extracted data."""
-    state['history'].append({
-        "role": "assistant",
-        "content": "File processed. Here is the extracted data. Please review it carefully."
-    })
+    if state.get('onboarding_data'):
+        state['history'].append({
+            "role": "assistant",
+            "content": "File processed successfully! Here is the extracted data. Please review it carefully.",
+            "type": "dataframe",
+            "data": state['onboarding_data']
+        })
+    else:
+        state['history'].append({
+            "role": "assistant",
+            "content": "Please upload an Excel file with employee data to continue."
+        })
     return state
 
 def start_manual_entry(state: OnboardingState):
@@ -45,85 +53,157 @@ def start_manual_entry(state: OnboardingState):
 def process_manual_entry(state: OnboardingState):
     """Node to handle each step of the manual entry process."""
     fields_order = ["name", "phone", "designation", "salary"]
-    current_field = state['manual_entry_field']
-    user_input = state['history'][-1]['content']
+    current_field = state.get('manual_entry_field', "name")
+    user_input = state['history'][-1]['content'] if state['history'] else ""
     
+    # Store the current field value
     state['current_manual_entry'][current_field] = user_input
     
-    current_index = fields_order.index(current_field)
-    if current_index + 1 < len(fields_order):
-        next_field = fields_order[current_index + 1]
-        state['manual_entry_field'] = next_field
-        state['history'].append({
-            "role": "assistant",
-            "content": f"Great. Now, what is their {next_field.replace('_', ' ')}?"
-        })
-    else:
-        state['onboarding_data'].append(state['current_manual_entry'])
-        state['manual_entry_field'] = None # Signal completion
+    # Move to next field
+    try:
+        current_index = fields_order.index(current_field)
+        if current_index + 1 < len(fields_order):
+            next_field = fields_order[current_index + 1]
+            state['manual_entry_field'] = next_field
+            
+            # Create appropriate prompt for next field
+            field_prompts = {
+                "phone": "Great! Now, what is their phone number?",
+                "designation": "Perfect! What is their job designation/title?",
+                "salary": "Excellent! What is their salary (annual amount)?"
+            }
+            
+            state['history'].append({
+                "role": "assistant",
+                "content": field_prompts.get(next_field, f"Now, what is their {next_field}?")
+            })
+        else:
+            # All fields collected, add to onboarding data
+            state['onboarding_data'].append(state['current_manual_entry'].copy())
+            state['manual_entry_field'] = ""  # Signal completion
+            state['current_manual_entry'] = {}
+            state['history'].append({
+                "role": "assistant",
+                "content": "All details collected! You can review the data below and choose your next action.",
+                "type": "dataframe",
+                "data": state['onboarding_data']
+            })
+            state['history'].append({
+                "role": "assistant",
+                "content": "What would you like to do next?",
+                "type": "choice",
+                "options": ["Save Data", "Add Another Employee", "Modify Data"]
+            })
+    except ValueError:
+        # Field not found in order, restart
+        state['manual_entry_field'] = "name"
         state['current_manual_entry'] = {}
         state['history'].append({
             "role": "assistant",
-            "content": "All details for one employee have been collected."
+            "content": "Let's start over. What is the employee's full name?"
         })
+    
     return state
 
 def validate_data(state: OnboardingState):
     """Node to show collected data and ask for user validation."""
-    state['history'].append({
-        "role": "assistant",
-        "content": "Please review the collected data. Do you want to proceed with saving, modify the data, or add another employee manually?",
-        "type": "dataframe",
-        "data": state['onboarding_data']
-    })
-    state['history'].append({
-        "role": "assistant",
-        "content": "",
-        "type": "choice",
-        "options": ["Proceed to Save", "Modify Data", "Add Another Manually"]
-    })
+    if state.get('onboarding_data'):
+        state['history'].append({
+            "role": "assistant",
+            "content": "Please review the collected employee data below:",
+            "type": "dataframe",
+            "data": state['onboarding_data']
+        })
+        state['history'].append({
+            "role": "assistant",
+            "content": "What would you like to do?",
+            "type": "choice",
+            "options": ["Save Data", "Add Another Employee", "Modify Data", "Clear All Data"]
+        })
+    else:
+        state['history'].append({
+            "role": "assistant",
+            "content": "No employee data found. Would you like to add an employee?",
+            "type": "choice",
+            "options": ["Enter Manually", "Upload Excel File"]
+        })
     return state
     
 def save_data(state: OnboardingState):
     """Node to save the final data to the database."""
-    result_message = save_to_db(state['onboarding_data'])
+    if state.get('onboarding_data'):
+        result_message = save_to_db(state['onboarding_data'])
+        state['history'].append({
+            "role": "assistant",
+            "content": f"{result_message}\n\nThe onboarding process is complete! You are now back in standard chat mode."
+        })
+        # Clear the onboarding data after saving
+        state['onboarding_data'] = []
+    else:
+        state['history'].append({
+            "role": "assistant",
+            "content": "No data to save. The onboarding process is complete."
+        })
+    return state
+
+def clear_data(state: OnboardingState):
+    """Node to clear all collected data."""
+    state['onboarding_data'] = []
+    state['current_manual_entry'] = {}
+    state['manual_entry_field'] = ""
     state['history'].append({
         "role": "assistant",
-        "content": f"{result_message}\nThe onboarding process is complete. You are now back in standard chat mode."
+        "content": "All data cleared. What would you like to do next?",
+        "type": "choice",
+        "options": ["Enter Manually", "Upload Excel File"]
     })
     return state
 
-# --- NEW: Conditional Entry Point Router ---
+# --- Routing Functions ---
 def route_entry_point(state: OnboardingState):
     """
     Routes the workflow based on the last user message to the correct starting node.
-    This is the main dispatcher for the graph.
     """
+    if not state.get('history'):
+        return "start_onboarding"
+    
     last_message = state['history'][-1]['content'].lower()
 
+    # Handle specific user choices
     if "start onboarding" in last_message:
         return "start_onboarding"
-    if "upload" in last_message:
+    elif "upload excel file" in last_message:
         return "process_upload"
-    if "enter manually" in last_message:
-        # If we are just starting manual entry
-        if not state.get('manual_entry_field'):
-            return "start_manual_entry"
-    if "add another manually" in last_message:
+    elif "enter manually" in last_message:
         return "start_manual_entry"
-    if "proceed" in last_message or "modify" in last_message:
+    elif "add another employee" in last_message:
+        return "start_manual_entry"
+    elif "save data" in last_message:
+        return "save_data"
+    elif "modify data" in last_message or "review" in last_message:
+        return "validate_data"
+    elif "clear all data" in last_message:
+        return "clear_data"
+    elif "file uploaded and processed" in last_message:
         return "validate_data"
     
-    # If none of the above, it's likely data for a manual field
-    if state.get('manual_entry_field'):
+    # If we're in the middle of manual entry
+    if state.get('manual_entry_field') and state['manual_entry_field'] != "":
         return "process_manual_entry"
     
-    # Fallback to the beginning
+    # Default fallback
     return "start_onboarding"
 
-# --- REFACTORED: Workflow Definition ---
+def route_after_manual_entry(state: OnboardingState):
+    """Routes after manual entry is complete."""
+    if state.get('manual_entry_field') == "":
+        return "validate_data"
+    else:
+        return END
+
+# --- Workflow Definition ---
 def create_onboarding_workflow():
-    """Creates and compiles the LangGraph workflow with a robust, event-driven structure."""
+    """Creates and compiles the LangGraph workflow."""
     workflow = StateGraph(OnboardingState)
 
     # Add all nodes
@@ -133,6 +213,7 @@ def create_onboarding_workflow():
     workflow.add_node("process_manual_entry", process_manual_entry)
     workflow.add_node("validate_data", validate_data)
     workflow.add_node("save_data", save_data)
+    workflow.add_node("clear_data", clear_data)
 
     # Set the conditional entry point
     workflow.set_conditional_entry_point(
@@ -143,26 +224,26 @@ def create_onboarding_workflow():
             "start_manual_entry": "start_manual_entry",
             "process_manual_entry": "process_manual_entry",
             "validate_data": "validate_data",
+            "save_data": "save_data",
+            "clear_data": "clear_data",
         }
     )
 
-    # Define the explicit flow of the graph
-    # KEY FIX: Nodes that require user input now go to END, pausing the graph.
+    # Define the flow edges
     workflow.add_edge("start_onboarding", END)
     workflow.add_edge("start_manual_entry", END)
     workflow.add_edge("validate_data", END)
     workflow.add_edge("save_data", END)
-
-    # After processing a file, always go to validation
+    workflow.add_edge("clear_data", END)
     workflow.add_edge("process_upload", "validate_data")
 
-    # After processing a manual field, decide whether to ask for the next field or validate
+    # Conditional edge for manual entry
     workflow.add_conditional_edges(
         "process_manual_entry",
-        lambda s: "validate_data" if s.get('manual_entry_field') is None else "process_manual_entry",
+        route_after_manual_entry,
         {
-            "process_manual_entry": END, # Ask the next question and wait
-            "validate_data": "validate_data" # All fields collected, go to validation
+            "validate_data": "validate_data",
+            END: END
         }
     )
 

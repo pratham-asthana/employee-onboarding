@@ -53,8 +53,9 @@ def display_chat_history():
             
             if msg.get("type") == "dataframe":
                 df = pd.DataFrame(msg["data"])
-                edited_df = st.data_editor(df, num_rows="dynamic", key="data_editor")
-                st.session_state.onboarding_state['onboarding_data'] = edited_df.to_dict('records')
+                edited_df = st.data_editor(df, num_rows="dynamic", key=f"data_editor_{len(st.session_state.messages)}")
+                if 'onboarding_state' in st.session_state and st.session_state.onboarding_state:
+                    st.session_state.onboarding_state['onboarding_data'] = edited_df.to_dict('records')
 
 # --- Main Application Logic ---
 def handle_user_input(prompt: str):
@@ -71,39 +72,55 @@ def handle_user_input(prompt: str):
             "onboarding_data": [],
             "current_manual_entry": {},
             "manual_entry_field": "",
-            "error_message": ""
         }
-        st.session_state.onboarding_state = st.session_state.onboarding_workflow.invoke(initial_state)
-        st.session_state.messages.extend(st.session_state.onboarding_state['history'][1:]) # Add bot responses
+        try:
+            st.session_state.onboarding_state = st.session_state.onboarding_workflow.invoke(initial_state)
+            if st.session_state.onboarding_state and 'history' in st.session_state.onboarding_state:
+                st.session_state.messages.extend(st.session_state.onboarding_state['history'][1:])
+        except Exception as e:
+            st.error(f"Error starting onboarding workflow: {e}")
+            st.session_state.app_mode = "chatbot"
         st.rerun()
 
     # Onboarding Flow Logic
     elif st.session_state.app_mode == "onboarding":
-        st.session_state.onboarding_state['history'].append({"role": "user", "content": prompt})
-        
-        # Invoke the graph with the updated state
-        response_state = st.session_state.onboarding_workflow.invoke(st.session_state.onboarding_state)
-        
-        # Check if the flow has ended
-        if response_state is None:
-            # The END node was reached
-            final_bot_message = st.session_state.onboarding_state['history'][-1]
-            st.session_state.messages.append(final_bot_message)
-            # Reset to chatbot mode
-            st.session_state.app_mode = "chatbot"
-            st.session_state.onboarding_state = None
-        else:
-            st.session_state.onboarding_state = response_state
-            # Append only new messages from the bot
-            new_messages = st.session_state.onboarding_state['history'][len(st.session_state.messages):]
-            st.session_state.messages.extend(new_messages)
+        if st.session_state.onboarding_state:
+            st.session_state.onboarding_state['history'].append({"role": "user", "content": prompt})
+            
+            try:
+                # Invoke the graph with the updated state
+                response_state = st.session_state.onboarding_workflow.invoke(st.session_state.onboarding_state)
+                
+                # Check if the flow has ended
+                if response_state is None:
+                    # The END node was reached
+                    if st.session_state.onboarding_state.get('history'):
+                        final_bot_message = st.session_state.onboarding_state['history'][-1]
+                        st.session_state.messages.append(final_bot_message)
+                    # Reset to chatbot mode
+                    st.session_state.app_mode = "chatbot"
+                    st.session_state.onboarding_state = None
+                else:
+                    st.session_state.onboarding_state = response_state
+                    # Append only new messages from the bot
+                    if 'history' in response_state:
+                        current_msg_count = len([m for m in st.session_state.messages if m.get("role") != "user" or m["content"] != prompt])
+                        new_messages = response_state['history'][current_msg_count:]
+                        st.session_state.messages.extend(new_messages)
+            except Exception as e:
+                st.error(f"Error in onboarding workflow: {e}")
+                st.session_state.app_mode = "chatbot"
+                st.session_state.onboarding_state = None
         st.rerun()
 
     # Standard Chatbot Logic
     else:
-        with st.spinner("Thinking..."):
-            response = st.session_state.gemini_model.invoke(prompt)
-            st.session_state.messages.append({"role": "assistant", "content": response.content})
+        try:
+            with st.spinner("Thinking..."):
+                response = st.session_state.gemini_model.invoke(prompt)
+                st.session_state.messages.append({"role": "assistant", "content": response.content})
+        except Exception as e:
+            st.error(f"Error processing message: {e}")
         st.rerun()
 
 # --- Main App Execution ---
@@ -122,34 +139,39 @@ initialize_app()
 
 # --- File Uploader Logic ---
 # This widget is placed outside the main chat flow to be accessible when needed.
-last_bot_message = st.session_state.messages[-1]["content"] if st.session_state.messages else ""
-if st.session_state.app_mode == "onboarding" and "upload excel file" in last_bot_message.lower():
-    uploaded_file = st.file_uploader("Upload an Excel file with employee data", type=["xlsx", "xls"])
-    if uploaded_file is not None:
-        with st.spinner("Processing your file... This may take a moment."):
-            raw_data = parse_excel_file(uploaded_file)
-            if raw_data:
-                extracted_data = []
-                # Use a progress bar for large files
-                progress_bar = st.progress(0, text="Extracting employee data...")
-                for i, row in enumerate(raw_data):
-                    text_chunk = ", ".join([f"{k}: {v}" for k, v in row.items()])
-                    extracted_row = extract_employee_data_from_text(text_chunk, st.session_state.gemini_model)
-                    
-                    # Validate and format data
-                    extracted_row['phone'] = extracted_row.get('phone', 'N/A')
-                    if not validate_phone_number(extracted_row['phone']):
-                       extracted_row['phone'] = f"INVALID - {extracted_row['phone']}"
-                    extracted_row['salary'] = format_salary(extracted_row.get('salary', 0))
+if st.session_state.messages:
+    last_bot_message = st.session_state.messages[-1]["content"]
+    if st.session_state.app_mode == "onboarding" and "upload excel file" in last_bot_message.lower():
+        uploaded_file = st.file_uploader("Upload an Excel file with employee data", type=["xlsx", "xls"])
+        if uploaded_file is not None:
+            with st.spinner("Processing your file... This may take a moment."):
+                try:
+                    raw_data = parse_excel_file(uploaded_file)
+                    if raw_data:
+                        extracted_data = []
+                        # Use a progress bar for large files
+                        progress_bar = st.progress(0, text="Extracting employee data...")
+                        for i, row in enumerate(raw_data):
+                            text_chunk = ", ".join([f"{k}: {v}" for k, v in row.items()])
+                            extracted_row = extract_employee_data_from_text(text_chunk, st.session_state.gemini_model)
+                            
+                            # Validate and format data
+                            extracted_row['phone'] = extracted_row.get('phone', 'N/A')
+                            if not validate_phone_number(extracted_row['phone']):
+                               extracted_row['phone'] = f"INVALID - {extracted_row['phone']}"
+                            extracted_row['salary'] = format_salary(extracted_row.get('salary', 0))
 
-                    extracted_data.append(extracted_row)
-                    progress_bar.progress((i + 1) / len(raw_data), text=f"Extracting employee data... ({i+1}/{len(raw_data)})")
-                
-                # Update the graph state and re-invoke
-                st.session_state.onboarding_state['onboarding_data'] = extracted_data
-                handle_user_input("File Uploaded and Processed")
-            else:
-                st.error("Could not parse the Excel file. Please check the format and try again.")
+                            extracted_data.append(extracted_row)
+                            progress_bar.progress((i + 1) / len(raw_data), text=f"Extracting employee data... ({i+1}/{len(raw_data)})")
+                        
+                        # Update the graph state and re-invoke
+                        if st.session_state.onboarding_state:
+                            st.session_state.onboarding_state['onboarding_data'] = extracted_data
+                            handle_user_input("File Uploaded and Processed")
+                    else:
+                        st.error("Could not parse the Excel file. Please check the format and try again.")
+                except Exception as e:
+                    st.error(f"Error processing file: {e}")
 
 # Display chat messages and UI elements
 display_chat_history()
